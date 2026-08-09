@@ -422,8 +422,9 @@ class DenpaPushPlugin(Star):
 
         支持两种输入:
         - 完整会话 "平台:消息类型:ID"(如 小赤羽:FriendMessage:2728007259)
-        - 纯 QQ 号 "2728007259": 若该 QQ 号已存在于现有会话则复用原会话;
-          否则沿用现有会话的 "平台:消息类型" 前缀拼装, 便于直接输入 QQ 号添加订阅。
+        - 纯 QQ 号 "2728007259": 直接输入 QQ 号即表示私聊(FriendMessage)。
+          若该 QQ 号已存在于现有会话则复用原会话(类型以其为准);
+          否则用现有会话的平台前缀拼成 "平台:FriendMessage:QQ号"。
         无可参照会话时返回空串(由调用方回退到下拉会话或报错)。
         """
         session = (session or "").strip()
@@ -432,11 +433,14 @@ class DenpaPushPlugin(Star):
         if ":" in session:
             return session
         existing = list(self.subscriptions) or list(self.monitored_sessions)
+        # 该 QQ 号已是某个会话: 复用(保留其原始类型, 群/私聊都对得上)
         for s in existing:
             if s and ":" in s and s.rsplit(":", 1)[-1] == session:
                 return s
+        # 新 QQ 号默认私聊, 平台前缀沿用现有会话
         if existing:
-            return f"{existing[0].rsplit(':', 1)[0]}:{session}"
+            platform_id = existing[0].split(":", 1)[0]
+            return f"{platform_id}:FriendMessage:{session}"
         return ""
 
     async def _api_dashboard_subscribe(self):
@@ -458,8 +462,8 @@ class DenpaPushPlugin(Star):
         if not target_session:
             return error_response("无可用会话，请先在群聊中使用 /twitter add 初始化", status_code=400)
 
-        session_users = self.subscriptions.setdefault(target_session, {})
-        if username in session_users:
+        # 已追踪该账号则直接返回(用 get 避免提前创建会话键)
+        if username in self.subscriptions.get(target_session, {}):
             return json_response({"ok": True, "message": f"@{username} 已在追踪中"})
 
         try:
@@ -470,6 +474,10 @@ class DenpaPushPlugin(Star):
             avatar_url = getattr(user, "profile_image_url", "") or ""
             if avatar_url:
                 avatar_url = avatar_url.replace("_normal.", "_400x400.")
+            # 拉取成功后才落会话键，失败时不残留内存幻影会话
+            session_users = self.subscriptions.setdefault(target_session, {})
+            if username in session_users:
+                return json_response({"ok": True, "message": f"@{username} 已在追踪中"})
             session_users[username] = {
                 "user_id": user.id,
                 "name": getattr(user, "name", "") or username,
