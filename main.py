@@ -417,14 +417,14 @@ class DenpaPushPlugin(Star):
 
         return json_response(self.subscriptions)
 
-    def _normalize_session(self, session: str) -> str:
+    def _normalize_session(self, session: str, message_type: str = "") -> str:
         """把前端传入的会话统一为 unified_msg_origin 格式。
 
         支持两种输入:
         - 完整会话 "平台:消息类型:ID"(如 小赤羽:FriendMessage:2728007259)
-        - 纯 QQ 号 "2728007259": 直接输入 QQ 号即表示私聊(FriendMessage)。
-          若该 QQ 号已存在于现有会话则复用原会话(类型以其为准);
-          否则用现有会话的平台前缀拼成 "平台:FriendMessage:QQ号"。
+        - 纯 QQ 号 "2728007259": 若该 QQ 号已存在于现有会话则复用原会话(类型以其为准);
+          否则按 message_type(FriendMessage 私聊 / GroupMessage 群聊, 默认私聊)
+          用现有会话的平台前缀拼成 "平台:类型:QQ号"。
         无可参照会话时返回空串(由调用方回退到下拉会话或报错)。
         """
         session = (session or "").strip()
@@ -437,10 +437,13 @@ class DenpaPushPlugin(Star):
         for s in existing:
             if s and ":" in s and s.rsplit(":", 1)[-1] == session:
                 return s
-        # 新 QQ 号默认私聊, 平台前缀沿用现有会话
+        # 新 QQ 号: 用前端指定类型, 未指定或非法则默认私聊
+        mtype = (message_type or "").strip()
+        if mtype not in ("FriendMessage", "GroupMessage"):
+            mtype = "FriendMessage"
         if existing:
             platform_id = existing[0].split(":", 1)[0]
-            return f"{platform_id}:FriendMessage:{session}"
+            return f"{platform_id}:{mtype}:{session}"
         return ""
 
     async def _api_dashboard_subscribe(self):
@@ -452,8 +455,10 @@ class DenpaPushPlugin(Star):
         if not username:
             return error_response("缺少 username", status_code=400)
 
-        # 选择目标 session: 优先用前端指定的（纯 QQ 号会自动补全前缀），否则自动选
-        target_session = self._normalize_session(payload.get("session", ""))
+        # 选择目标 session: 优先用前端指定的（纯 QQ 号按所选类型补全前缀），否则自动选
+        target_session = self._normalize_session(
+            payload.get("session", ""), payload.get("session_type", "")
+        )
         if not target_session:
             if self.monitored_sessions:
                 target_session = next(iter(self.monitored_sessions))

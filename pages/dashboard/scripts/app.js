@@ -2235,6 +2235,7 @@ async function init() {
     if (!name) return;
     const addSessionSelect = document.getElementById("add-session-select");
     const addSessionInput = document.getElementById("add-session-input");
+    const addSessionType = document.getElementById("add-session-type");
     // Priority: manual input > dropdown selection
     const session = (addSessionInput && addSessionInput.value.trim()) || (addSessionSelect ? addSessionSelect.value : "");
     if (!session) {
@@ -2242,11 +2243,17 @@ async function init() {
       return;
     }
     try {
-      await bridge.apiPost("dashboard/subscribe", { username: name, session });
+      await bridge.apiPost("dashboard/subscribe", {
+        username: name,
+        session,
+        session_type: addSessionType ? addSessionType.value : "",
+      });
       toast(`已开始追踪 @${name}`, "success");
       input.value = "";
       if (addSessionSelect) addSessionSelect.value = "";
       if (addSessionInput) addSessionInput.value = "";
+      if (addSessionType) addSessionType.value = "FriendMessage";
+      pvSyncAllSelects();
       refresh();
     } catch (e) {
       toast(e?.message || "添加失败", "error");

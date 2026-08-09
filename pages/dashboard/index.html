@@ -9,9 +9,9 @@
     <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
     <link rel="preconnect" href="https://cdn-font.hyperos.mi.com" crossorigin />
     <link href="https://cdn-font.hyperos.mi.com/font/css?family=MiSans:100,200,300,400,450,500,600,650,700,900:Chinese_Simplify,Latin&display=swap" rel="stylesheet" />
-    <link rel="stylesheet" href="./styles/tokens.css?v=20260804k" />
-    <link rel="stylesheet" href="./styles/theme.css?v=20260804k" />
-    <link rel="stylesheet" href="./styles/components.css?v=20260804k" />
+    <link rel="stylesheet" href="./styles/tokens.css?v=20260804l" />
+    <link rel="stylesheet" href="./styles/theme.css?v=20260804l" />
+    <link rel="stylesheet" href="./styles/components.css?v=20260804l" />
   </head>
   <body>
     <div id="bg-layer" style="position:fixed;inset:0;z-index:-1;background-size:cover;background-position:center;background-repeat:no-repeat;pointer-events:none"></div>
@@ -202,8 +202,12 @@
               <div id="subs-session-list"></div>
               <div class="flex gap-s mt-m" style="align-items:center;flex-wrap:wrap">
                 <input class="input" id="add-username" placeholder="@username" style="max-width:200px" spellcheck="false" />
-                <input class="input" id="add-session-input" placeholder="或输入QQ号" style="max-width:180px" spellcheck="false" inputmode="numeric" autocomplete="off" />
-                <select class="select" id="add-session-select" style="max-width:180px">
+                <input class="input" id="add-session-input" placeholder="或输入QQ号" style="max-width:150px" spellcheck="false" inputmode="numeric" autocomplete="off" />
+                <select class="select" id="add-session-type" style="max-width:96px" title="输入新QQ号时，补全为私聊还是群聊">
+                  <option value="FriendMessage">私聊</option>
+                  <option value="GroupMessage">群聊</option>
+                </select>
+                <select class="select" id="add-session-select" style="max-width:170px">
                   <option value="">选择会话…</option>
                 </select>
                 <button class="btn btn-primary" id="btn-add-sub">
@@ -515,6 +519,6 @@
     </div>
 
     <div class="toast-container" id="toast-container"></div>
-    <script type="module" src="./scripts/app.js?v=20260804k"></script>
+    <script type="module" src="./scripts/app.js?v=20260804l"></script>
   </body>
 </html>
