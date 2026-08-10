@@ -15,6 +15,9 @@ from .twitter_client import TwitterClient
 DATA_DIR = "data/config"
 DATA_FILE = "astrbot_plugin_denpa_push_data.json"
 
+# 同一条推文连续多少轮推送失败后强制跳过(防止会话基线永久卡死在某条上)
+PUSH_MAX_FAIL_ROUNDS = 5
+
 
 def _plain(text: str) -> MessageChain:
     """Create a plain text MessageChain."""
@@ -121,6 +124,7 @@ class DenpaPushPlugin(Star):
         self._push_logs = deque(maxlen=100)  # dashboard 信号日志
         self._push_history = deque()  # dashboard 推送历史(含卡片详情)，按保留天数清理
         self._total_pushes = 0
+        self._push_fail_counts = {}  # {(session_umo, username, tweet_id): 连续失败轮数}
         self._token_stats = {"prompt": 0, "completion": 0, "total": 0, "calls": 0}
         self._register_dashboard_apis(context)
 
@@ -1341,50 +1345,89 @@ class DenpaPushPlugin(Star):
                     new_tweets = [t for t in tweets if t.id > last_id]
 
                     if new_tweets:
-                        target_sessions = [
-                            s
-                            for s in user_sessions.get(username, [])
-                            if s in self.monitored_sessions
-                        ]
-                        logger.info(
-                            f"[Monitor] {username}: {len(new_tweets)} new tweets "
-                            f"(last={last_id[:15]}.., targets={len(target_sessions)})"
-                        )
-
-                        for t in reversed(new_tweets):
-                            data = TwitterClient.extract_tweet_data(t)
-                            await self._process_and_push(data, target_sessions)
-                            await asyncio.sleep(2)
-
-                        max_id = new_tweets[0].id
-                        latest_user = getattr(new_tweets[0], "user", None)
-                        latest_av = (
-                            (getattr(latest_user, "profile_image_url", "") or "")
-                            if latest_user
-                            else ""
-                        )
-                        if latest_av:
-                            latest_av = latest_av.replace("_normal.", "_400x400.")
-                        latest_name = (
-                            (getattr(latest_user, "name", "") or "")
-                            if latest_user
-                            else ""
-                        )
+                        pushed_any = False
                         for sess_umo in user_sessions.get(username, []):
                             sess_users = self.subscriptions.get(sess_umo)
-                            if sess_users and username in sess_users:
-                                sess_users[username]["last_tweet_id"] = max_id
-                                sess_users[username]["last_checked_at"] = datetime.now(
+                            sess_info = (sess_users or {}).get(username)
+                            if not sess_info:
+                                continue
+                            # 未监控的会话: 丢弃本轮新推文并推进基线, 防止开启监控后补推轰炸
+                            if sess_umo not in self.monitored_sessions:
+                                sess_info["last_tweet_id"] = new_tweets[0].id
+                                sess_info["last_checked_at"] = datetime.now(
                                     timezone.utc
                                 ).isoformat()
-                                if latest_av:
-                                    sess_users[username]["avatar_url"] = latest_av
-                                if latest_name:
-                                    sess_users[username]["name"] = latest_name
+                                continue
+                            # 该会话自己的待推区间(各会话基线独立, 失败会话下轮从失败点补推)
+                            sess_new = [
+                                t
+                                for t in tweets
+                                if t.id > sess_info.get("last_tweet_id", "0")
+                            ]
+                            if not sess_new:
+                                continue
+                            logger.info(
+                                f"[Monitor] {username} → {sess_umo[:20]}…: "
+                                f"{len(sess_new)} new tweets "
+                                f"(last={sess_info.get('last_tweet_id', '0')[:15]}..)"
+                            )
+                            for t in reversed(sess_new):
+                                ok = False
+                                try:
+                                    data = TwitterClient.extract_tweet_data(t)
+                                    results = await self._process_and_push(
+                                        data, [sess_umo]
+                                    )
+                                    ok = results.get(sess_umo, False)
+                                except Exception as e:
+                                    logger.error(
+                                        f"[Monitor] Push failed for {username}: {t.id}: {e}"
+                                    )
+                                if ok:
+                                    # 推送成功 → 基线推进到本条
+                                    sess_info["last_tweet_id"] = t.id
+                                    sess_info["last_checked_at"] = datetime.now(
+                                        timezone.utc
+                                    ).isoformat()
+                                    pushed_any = True
+                                    self._push_fail_counts.pop(
+                                        (sess_umo, username, t.id), None
+                                    )
+                                else:
+                                    # 推送失败 → 基线不推进, 停在本条之前, 下轮自动补推
+                                    fkey = (sess_umo, username, t.id)
+                                    fail_rounds = (
+                                        self._push_fail_counts.get(fkey, 0) + 1
+                                    )
+                                    self._push_fail_counts[fkey] = fail_rounds
+                                    if fail_rounds >= PUSH_MAX_FAIL_ROUNDS:
+                                        # 连续多轮失败: 强制跳过, 防基线永久卡死
+                                        logger.warning(
+                                            f"[Monitor] {username} → {sess_umo[:20]}…: "
+                                            f"{t.id[:15]}.. failed {fail_rounds} rounds, skipping"
+                                        )
+                                        self._log_push(
+                                            f"@{username} 推文 {t.id[:12]}… 连续 "
+                                            f"{fail_rounds} 轮推送失败，已强制跳过",
+                                            "error",
+                                        )
+                                        sess_info["last_tweet_id"] = t.id
+                                        sess_info["last_checked_at"] = datetime.now(
+                                            timezone.utc
+                                        ).isoformat()
+                                        self._push_fail_counts.pop(fkey, None)
+                                    else:
+                                        self._log_push(
+                                            f"@{username} → {sess_umo[:20]}… 推送失败，基线未推进，下轮补推",
+                                            "error",
+                                        )
+                                    break
+                                await asyncio.sleep(2)
                         self._save_data()
-                        logger.info(
-                            f"[Monitor] {username}: last_id updated to {max_id[:15]}.."
-                        )
+                        if pushed_any:
+                            logger.info(
+                                f"[Monitor] {username}: pushed, baseline advanced per session"
+                            )
                     else:
                         logger.debug(f"[Monitor] {username}: no new tweets")
                 except asyncio.CancelledError:
@@ -1934,9 +1977,14 @@ class DenpaPushPlugin(Star):
             except Exception:
                 pass
 
-    async def _process_and_push(self, data: dict, target_sessions: list):
+    async def _process_and_push(self, data: dict, target_sessions: list) -> dict:
+        """推送一条推文到各目标会话。
+
+        返回 {session_umo: bool}: 该会话本次是否完整推送成功。
+        失败会话由调用方决定基线是否推进(失败不推进, 下轮补推)。
+        """
         if not target_sessions:
-            return
+            return {}
 
         import tempfile, httpx as _httpx
 
@@ -1979,6 +2027,7 @@ class DenpaPushPlugin(Star):
 
         info = await self._build_card_data(data, media_url_to_path)
 
+        results = {s: False for s in target_sessions}
         for session_umo in target_sessions:
             try:
                 # 主消息：卡片（多张分块）+ 推主注明
@@ -2055,9 +2104,11 @@ class DenpaPushPlugin(Star):
                     "push",
                 )
                 self._record_push_history(info, session_umo, source="auto")
+                results[session_umo] = True
             except Exception as e:
                 logger.error(f"[Push] Failed to push to {session_umo}: {e}")
                 self._log_push(f"推送失败 @{info.get('screen_name', '?')}: {str(e)[:60]}", "error")
+        return results
 
     async def _get_provider_id(self) -> str:
         pid = self.config.get("text_translate_provider", "")
