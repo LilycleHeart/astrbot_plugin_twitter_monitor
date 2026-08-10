@@ -145,7 +145,33 @@ class DenpaPushPlugin(Star):
 
         暂时性失败不累计跳过轮数, 恢复后自动补推; 只有持久性失败
         (推文内容/渲染本身有问题)才累计并触发 PUSH_MAX_FAIL_ROUNDS 强制跳过。
+
+        优先按异常类型识别(部分异常无错误信息, 如 aiocqhttp.ApiNotAvailable):
+        - aiocqhttp.NetworkError / ApiNotAvailable → 掉线/超时, 临时
+        - aiocqhttp.ActionFailed → OneBot 执行失败(禁言/非好友/目标不存在), 持久
+        - websockets.ConnectionClosed → 连接断开, 临时
         """
+        try:
+            from aiocqhttp.exceptions import (
+                ActionFailed,
+                ApiNotAvailable,
+                NetworkError,
+            )
+
+            if isinstance(e, ActionFailed):
+                return False
+            if isinstance(e, (NetworkError, ApiNotAvailable)):
+                return True
+        except ImportError:
+            pass
+        try:
+            from websockets.exceptions import ConnectionClosed
+
+            if isinstance(e, ConnectionClosed):
+                return True
+        except ImportError:
+            pass
+
         import httpx as _httpx
 
         msg = str(e)
@@ -165,9 +191,13 @@ class DenpaPushPlugin(Star):
             "name or service",
             "certificate",
             "reset",
+            "aborted",
             "closed",
             "refused",
             "broken pipe",
+            "websocket",
+            "api not available",
+            "http request failed",
             "offline",
             "disconnected",
             "连接失败",
