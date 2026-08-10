@@ -140,6 +140,45 @@ class DenpaPushPlugin(Star):
     def _token_stats_path(self):
         return os.path.join(os.path.dirname(self._data_path), "denpa_push_token_stats.json")
 
+    def _is_transient_failure(self, e: Exception) -> bool:
+        """判断推送失败是否属于暂时性故障(掉线/网络/超时/平台抖动)。
+
+        暂时性失败不累计跳过轮数, 恢复后自动补推; 只有持久性失败
+        (推文内容/渲染本身有问题)才累计并触发 PUSH_MAX_FAIL_ROUNDS 强制跳过。
+        """
+        import httpx as _httpx
+
+        msg = str(e)
+        if isinstance(e, (_httpx.ConnectError, _httpx.TimeoutException)):
+            return True
+        transient = (
+            "timeout",
+            "timed out",
+            "timedout",
+            "connection",
+            "connect",
+            "network",
+            "socket",
+            "ssl",
+            "handshake",
+            "dns",
+            "name or service",
+            "certificate",
+            "reset",
+            "closed",
+            "refused",
+            "broken pipe",
+            "offline",
+            "disconnected",
+            "连接失败",
+            "连接超时",
+            "网络",
+            "掉线",
+            "离线",
+            "超时",
+        )
+        return any(k in msg.lower() for k in transient)
+
     def _load_push_history(self):
         try:
             if os.path.exists(self._push_history_path):
@@ -1373,6 +1412,7 @@ class DenpaPushPlugin(Star):
                             )
                             for t in reversed(sess_new):
                                 ok = False
+                                push_err = None
                                 try:
                                     data = TwitterClient.extract_tweet_data(t)
                                     results = await self._process_and_push(
@@ -1380,6 +1420,7 @@ class DenpaPushPlugin(Star):
                                     )
                                     ok = results.get(sess_umo, False)
                                 except Exception as e:
+                                    push_err = e
                                     logger.error(
                                         f"[Monitor] Push failed for {username}: {t.id}: {e}"
                                     )
@@ -1394,14 +1435,30 @@ class DenpaPushPlugin(Star):
                                         (sess_umo, username, t.id), None
                                     )
                                 else:
-                                    # 推送失败 → 基线不推进, 停在本条之前, 下轮自动补推
+                                    # 推送失败 → 基线不推进, 停在本条之前, 下轮自动补推。
+                                    # 暂时性失败(掉线/网络/超时)不累计轮数, 恢复后继续补推;
+                                    # 只有持久性失败(内容/渲染问题)才累计, 连续多轮后强制跳过。
                                     fkey = (sess_umo, username, t.id)
-                                    fail_rounds = (
-                                        self._push_fail_counts.get(fkey, 0) + 1
+                                    transient = push_err is not None and (
+                                        self._is_transient_failure(push_err)
                                     )
-                                    self._push_fail_counts[fkey] = fail_rounds
+                                    if transient:
+                                        fail_rounds = 0
+                                        self._log_push(
+                                            f"@{username} → {sess_umo[:20]}… 推送暂时失败(网络/超时)，下轮自动补推",
+                                            "error",
+                                        )
+                                    else:
+                                        fail_rounds = (
+                                            self._push_fail_counts.get(fkey, 0) + 1
+                                        )
+                                        self._push_fail_counts[fkey] = fail_rounds
+                                        self._log_push(
+                                            f"@{username} → {sess_umo[:20]}… 推送失败，基线未推进，下轮补推",
+                                            "error",
+                                        )
                                     if fail_rounds >= PUSH_MAX_FAIL_ROUNDS:
-                                        # 连续多轮失败: 强制跳过, 防基线永久卡死
+                                        # 连续多轮持久失败: 强制跳过, 防基线永久卡死
                                         logger.warning(
                                             f"[Monitor] {username} → {sess_umo[:20]}…: "
                                             f"{t.id[:15]}.. failed {fail_rounds} rounds, skipping"
@@ -1416,11 +1473,6 @@ class DenpaPushPlugin(Star):
                                             timezone.utc
                                         ).isoformat()
                                         self._push_fail_counts.pop(fkey, None)
-                                    else:
-                                        self._log_push(
-                                            f"@{username} → {sess_umo[:20]}… 推送失败，基线未推进，下轮补推",
-                                            "error",
-                                        )
                                     break
                                 await asyncio.sleep(2)
                         self._save_data()
