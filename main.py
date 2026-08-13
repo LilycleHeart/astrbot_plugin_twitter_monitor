@@ -478,7 +478,6 @@ class DenpaPushPlugin(Star):
             "playwright_ready": _pw_browser is not None and _pw_browser.is_connected(),
             "translation_language": self.config.get("translation_language", "中文"),
             "color_source": self.config.get("color_source", "avatar"),
-            "gif_encoder": self.config.get("gif_encoder", "auto"),
             "proxy": self.config.get("proxy", ""),
             "token_stats": dict(self._token_stats),
             "cache_size_bytes": self._data_cache_size_bytes(),
@@ -649,7 +648,7 @@ class DenpaPushPlugin(Star):
             "text_translate_provider", "image_translate_provider",
             "image_translate_mode", "translation_language",
             "text_translate_prompt", "image_translate_prompt",
-            "color_source", "gif_encoder",
+            "color_source",
             "history_retention_days", "history_auto_clean", "proxy",
         ]
         if request.method == "GET":
@@ -1158,13 +1157,13 @@ class DenpaPushPlugin(Star):
 
             async def _convert_to_gif(mp4_path):
                 try:
-                    import json, shutil, glob as _glob
+                    import json, shutil
 
                     _ffmpeg = shutil.which("ffmpeg")
                     _ffprobe = shutil.which("ffprobe")
-                    if not _ffmpeg or not _ffprobe:
+                    if not _ffmpeg:
                         logger.warning(
-                            "ffmpeg/ffprobe not found, GIF conversion unavailable. "
+                            "ffmpeg not found, GIF conversion unavailable. "
                             "Install: apt install ffmpeg"
                         )
                         return None
@@ -1172,60 +1171,28 @@ class DenpaPushPlugin(Star):
                     gif_path = mp4_path.rsplit(".", 1)[0] + ".gif"
                     # detect original fps via ffprobe
                     fps = 15
-                    try:
-                        probe = await asyncio.create_subprocess_exec(
-                            _ffprobe,
-                            "-v", "error",
-                            "-select_streams", "v:0",
-                            "-show_entries", "stream=r_frame_rate",
-                            "-of", "json",
-                            mp4_path,
-                            stdout=subprocess.PIPE,
-                            stderr=subprocess.DEVNULL,
-                        )
-                        out, _ = await probe.communicate()
-                        info = json.loads(out.decode())
-                        num, den = map(
-                            int, info["streams"][0]["r_frame_rate"].split("/")
-                        )
-                        fps = num / den if den else 15
-                    except Exception:
-                        pass
-
-                    encoder = self.config.get("gif_encoder", "auto")
-                    _gifski = shutil.which("gifski") if encoder != "ffmpeg" else None
-                    if encoder == "gifski" and not _gifski:
-                        logger.warning("gifski not found, falling back to ffmpeg. Install: apt install gifski")
-                    if _gifski:
-                        # gifski: ffmpeg 导出 PNG 帧 → gifski 编码高质量 GIF
-                        frames_dir = tempfile.mkdtemp(prefix="denpa_frames_")
+                    if _ffprobe:
                         try:
-                            frame_pattern = os.path.join(frames_dir, "frame_%04d.png")
-                            ffmpeg_proc = await asyncio.create_subprocess_exec(
-                                _ffmpeg,
-                                "-i", mp4_path,
-                                "-vf", f"fps={fps:.2f}",
-                                "-y", frame_pattern,
-                                stdout=subprocess.DEVNULL,
+                            probe = await asyncio.create_subprocess_exec(
+                                _ffprobe,
+                                "-v", "error",
+                                "-select_streams", "v:0",
+                                "-show_entries", "stream=r_frame_rate",
+                                "-of", "json",
+                                mp4_path,
+                                stdout=subprocess.PIPE,
                                 stderr=subprocess.DEVNULL,
                             )
-                            rc = await ffmpeg_proc.wait()
-                            if rc == 0 and os.listdir(frames_dir):
-                                gifski_proc = await asyncio.create_subprocess_exec(
-                                    _gifski,
-                                    "-o", gif_path,
-                                    "--fps", str(int(fps)),
-                                    os.path.join(frames_dir, "frame_*.png"),
-                                    stdout=subprocess.DEVNULL,
-                                    stderr=subprocess.DEVNULL,
-                                )
-                                rc2 = await gifski_proc.wait()
-                                if rc2 == 0 and os.path.exists(gif_path):
-                                    return gif_path
-                        finally:
-                            shutil.rmtree(frames_dir, ignore_errors=True)
+                            out, _ = await probe.communicate()
+                            info = json.loads(out.decode())
+                            num, den = map(
+                                int, info["streams"][0]["r_frame_rate"].split("/")
+                            )
+                            fps = num / den if den else 15
+                        except Exception:
+                            pass
 
-                    # fallback: ffmpeg palettegen+paletteuse
+                    # ffmpeg palettegen+paletteuse
                     palette_filter = (
                         f"fps={fps:.2f},"
                         f"split[s0][s1];"

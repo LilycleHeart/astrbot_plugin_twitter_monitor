@@ -59,13 +59,6 @@
     "default": "avatar",
     "hint": "avatar=从头像取色; first_image=从第一张图片取色（无图时降级为头像）"
   },
-  "gif_encoder": {
-    "description": "GIF 编码器",
-    "type": "string",
-    "options": ["auto", "gifski", "ffmpeg"],
-    "default": "auto",
-    "hint": "auto=优先gifski否则ffmpeg; gifski=高质量需安装gifski; ffmpeg=palettegen调色板"
-  },
   "history_retention_days": {
     "description": "追踪卡片保留天数",
     "type": "int",

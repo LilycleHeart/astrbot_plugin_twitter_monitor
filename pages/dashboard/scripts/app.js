@@ -2075,7 +2075,6 @@ async function loadPluginConfig() {
     set("cfg-image_translate_mode", cfg.image_translate_mode || "multimodal");
     set("cfg-translation_language", cfg.translation_language || "中文");
     set("cfg-color_source", cfg.color_source || "avatar");
-    set("cfg-gif_encoder", cfg.gif_encoder || "auto");
     set("cfg-text_translate_prompt", cfg.text_translate_prompt || "");
     set("cfg-image_translate_prompt", cfg.image_translate_prompt || "");
     set("cfg-history_retention_days", cfg.history_retention_days ?? 30);
@@ -2279,7 +2278,7 @@ async function init() {
       "text_translate_provider", "image_translate_provider",
       "image_translate_mode", "translation_language",
       "text_translate_prompt", "image_translate_prompt",
-      "color_source", "gif_encoder", "history_retention_days", "proxy",
+      "color_source", "history_retention_days", "proxy",
     ];
     const payload = {};
     keys.forEach(k => {
