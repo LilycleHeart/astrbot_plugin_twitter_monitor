@@ -65,6 +65,14 @@ body{
 .media-row .ico svg{display:block;width:1em;height:1em;fill:currentColor}
 .media-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:6px;margin-top:6px}
 .media-grid img{width:100%;height:auto;border-radius:12px;border:1px solid rgba(var(--md-on-surface-variant-rgb),0.12)}
+/* 瀑布流:4 张及以上按列纵向排列,高度参差错落 */
+.media-masonry{display:block;column-count:3;column-gap:6px;margin-top:6px}
+.media-masonry img{width:100%;height:auto;display:block;margin-bottom:6px;break-inside:avoid;border-radius:12px;border:1px solid rgba(var(--md-on-surface-variant-rgb),0.12)}
+/* 2+1 大图:3 张图时左列大图 + 右列两张上下排,行高由 JS 按首图比例设置 */
+.media-feature{display:flex;gap:6px;margin-top:6px;align-items:stretch}
+.media-feature img{flex:1;min-width:0;min-height:0;width:100%;height:100%;object-fit:cover;border-radius:12px;border:1px solid rgba(var(--md-on-surface-variant-rgb),0.12)}
+.media-feature .mf-main{flex:2}
+.media-feature .mf-col{flex:1;min-width:0;display:flex;flex-direction:column;gap:6px;height:100%}
 .divider{height:1px;background:rgba(var(--md-on-surface-variant-rgb),0.12);margin:2px 0}
 .footer{text-align:center;font-size:12px;color:var(--md-on-surface-variant);padding-top:10px}
 .image-translation{margin-top:8px;font-size:13px;color:var(--md-on-surface-variant);font-style:italic}
@@ -184,11 +192,22 @@ body{
   </div>
 
   {% if thumbnail_urls %}
-  <div class="media-grid">
+  {% if thumbnail_urls|length == 3 %}
+  <div class="media-feature">
+    <img class="mf-main" src="{{ thumbnail_urls[0] }}" alt="media" onerror="this.style.display='none'"/>
+    <div class="mf-col">
+      {% for url in thumbnail_urls[1:] %}
+      <img src="{{ url }}" alt="media" onerror="this.style.display='none'"/>
+      {% endfor %}
+    </div>
+  </div>
+  {% else %}
+  <div class="media-grid{% if thumbnail_urls|length >= 4 %} media-masonry{% endif %}">
     {% for url in thumbnail_urls %}
-    <img src="{{ url }}" alt="media"/>
+    <img src="{{ url }}" alt="media" onerror="this.style.display='none'"/>
     {% endfor %}
   </div>
+  {% endif %}
   {% endif %}
   {% endif %}
 
@@ -199,5 +218,22 @@ body{
 </div>
 
 </div>
+{% if thumbnail_urls|length == 3 %}
+<script>
+/* 2+1 大图布局:行高按首图(大图)自然比例计算,主图完整优先;上限 640px 防超长图撑爆卡片 */
+(function () {
+  var el = document.querySelector('.media-feature');
+  var main = el && el.querySelector('.mf-main');
+  if (!el || !main) return;
+  function layout() {
+    if (!main.naturalWidth) return;
+    var h = main.naturalHeight * main.clientWidth / main.naturalWidth;
+    el.style.height = Math.min(h, 640) + 'px';
+  }
+  layout();
+  main.addEventListener('load', layout);
+})();
+</script>
+{% endif %}
 </body>
 </html>

@@ -1997,6 +1997,15 @@ class DenpaPushPlugin(Star):
                     timeout=10000,
                 )
                 await page.wait_for_timeout(300)
+                # 等待所有图片加载完成(成功或失败)再测高/截图,
+                # 瀑布流/网格会随图片加载重排,提前截图会错位或留空白
+                try:
+                    await page.wait_for_function(
+                        "() => [...document.images].every(img => img.complete)",
+                        timeout=8000,
+                    )
+                except Exception:
+                    pass
                 h = await page.evaluate("document.body.scrollHeight")
                 await page.set_viewport_size({"width": 620, "height": h})
                 await page.wait_for_timeout(500)

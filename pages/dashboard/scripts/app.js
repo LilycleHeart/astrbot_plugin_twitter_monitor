@@ -70,6 +70,14 @@ function escapeHtml(str) {
   return d.innerHTML;
 }
 
+/* 2+1 大图布局:行高按首图(大图)自然比例计算,主图完整优先;上限 640px 防超长图撑爆卡片 */
+function mfLayout(mainImg) {
+  const el = mainImg.closest(".tc-media-feature");
+  if (!el || !mainImg.naturalWidth) return;
+  const h = mainImg.naturalHeight * mainImg.clientWidth / mainImg.naturalWidth;
+  el.style.height = Math.min(h, 640) + "px";
+}
+
 // ─── M3 Palette Application (照搬 denpa_echo 完整实现) ───
 const paletteCache = {};
 const STATUS_SOURCES = { success: "#1B9C5D", warning: "#C98A1B" };
@@ -1731,10 +1739,16 @@ function buildHistoryCard(item) {
           <div class="tc-media-row">
             <svg viewBox="0 0 24 24"><path d="M21 19V5c0-1.1-.9-2-2-2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2zM8.5 13.5l2.5 3.01L14.5 12l4.5 6H5l3.5-4.5z"/></svg> ${imgN} images${gifN > 0 ? ` · ${gifN} gifs` : ""}${vidN > 0 ? ` · ${vidN} videos` : ""}
           </div>
-          ${thumbs.length ? `
+          ${thumbs.length === 3 ? `
+          <div class="tc-media-feature">
+            <img class="tc-mf-main" src="${escapeHtml(thumbs[0])}" alt="media" referrerpolicy="no-referrer" onerror="this.style.display='none'" onload="mfLayout(this)" />
+            <div class="tc-mf-col">
+              ${thumbs.slice(1).map(u => `<img src="${escapeHtml(u)}" alt="media" referrerpolicy="no-referrer" onerror="this.style.display='none'" />`).join("")}
+            </div>
+          </div>` : `
           <div class="tc-media-grid">
             ${thumbs.map(u => `<img src="${escapeHtml(u)}" alt="media" referrerpolicy="no-referrer" onerror="this.style.display='none'" />`).join("")}
-          </div>` : ""}
+          </div>`}
           ` : ""}
 
           <div class="tc-divider"></div>
