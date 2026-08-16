@@ -323,7 +323,14 @@ class DenpaPushPlugin(Star):
             self._start_monitor()
         logger.info("Twitter Monitor plugin initialized")
         # 自动后台重建历史卡片（补齐缺失头像/媒体/配色）
-        if self._push_history:
+        # 仅当存在缺少 avatar_url/thumbnail_urls 键的旧条目时才重建，
+        # 避免每次重启都对已完整的卡片重新拉取 Twitter
+        if self._push_history and any(
+            not isinstance(e, dict)
+            or "thumbnail_urls" not in e
+            or "avatar_url" not in e
+            for e in self._push_history
+        ):
             asyncio.create_task(self._rebuild_history_async())
 
     def _apply_twitter_credentials(self):
@@ -715,8 +722,14 @@ class DenpaPushPlugin(Star):
             rebuilt = 0
             skipped = 0
             for entry in list(self._push_history):
-                # 已具备头像与媒体缩略图的条目跳过
-                if entry.get("avatar_url") and entry.get("thumbnail_urls"):
+                # 已具备头像与媒体缩略图键的条目跳过。
+                # 按"键是否存在"判断而非值真值：持久化的空列表表示推文本就无媒体，
+                # 并非缺失——否则纯文字推文会在每次重启时被重复拉取
+                if (
+                    isinstance(entry, dict)
+                    and "avatar_url" in entry
+                    and "thumbnail_urls" in entry
+                ):
                     skipped += 1
                     continue
                 # 解析 tweet_id：优先字段，其次从 tweet_url 提取
@@ -731,8 +744,11 @@ class DenpaPushPlugin(Star):
                     tweet = await self.twitter.get_tweet_by_id(tweet_id)
                     data = TwitterClient.extract_tweet_data(tweet)
                     raw_av = (data.get("user") or {}).get("avatar_url", "") or ""
-                    if raw_av:
-                        entry["avatar_url"] = raw_av.replace("_normal.", "_400x400.")
+                    # 无论是否取到头像都写键，保证重建成功后该条目被标记为完整，
+                    # 下次重启不会因空值被误判为缺失而重复拉取
+                    entry["avatar_url"] = (
+                        raw_av.replace("_normal.", "_400x400.") if raw_av else ""
+                    )
                     images, gifs, videos = TwitterClient.extract_tweet_media(data)
                     thumbs = []
                     for m in (images + gifs + videos)[:4]:
