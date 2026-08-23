@@ -126,7 +126,105 @@ class DenpaPushPlugin(Star):
         self._total_pushes = 0
         self._push_fail_counts = {}  # {(session_umo, username, tweet_id): 连续失败轮数}
         self._token_stats = {"prompt": 0, "completion": 0, "total": 0, "calls": 0}
+        # 共享连接池 + 并发信号量: 全局限制 LLM 与 HTTP 下载并发, 防止积压时连接风暴
+        self._http_client = None
+        self._http_semaphore = None
+        self._llm_semaphore = None
         self._register_dashboard_apis(context)
+
+    def _http_concurrency(self) -> int:
+        try:
+            return max(1, int(self.config.get("http_concurrency", 8)))
+        except (TypeError, ValueError):
+            return 8
+
+    def _llm_concurrency(self) -> int:
+        try:
+            return max(1, int(self.config.get("llm_concurrency", 3)))
+        except (TypeError, ValueError):
+            return 3
+
+    def _llm_timeout(self) -> float:
+        try:
+            return max(5.0, float(self.config.get("llm_timeout", 120)))
+        except (TypeError, ValueError):
+            return 120.0
+
+    def _get_http_semaphore(self) -> asyncio.Semaphore:
+        if self._http_semaphore is None:
+            self._http_semaphore = asyncio.Semaphore(self._http_concurrency())
+        return self._http_semaphore
+
+    def _get_llm_semaphore(self) -> asyncio.Semaphore:
+        if self._llm_semaphore is None:
+            self._llm_semaphore = asyncio.Semaphore(self._llm_concurrency())
+        return self._llm_semaphore
+
+    def _get_http_client(self):
+        """懒加载一个全局共享的 httpx.AsyncClient(连接池)。
+
+        复用同一个 client(而非每个文件新建)让 TCP+TLS 连接在多张图片下载间保活,
+        避免积压时几十个裸连接同时握手。proxy 由配置决定。
+        """
+        import httpx
+
+        if self._http_client is None or self._http_client.is_closed:
+            proxy = self.config.get("proxy", None)
+            self._http_client = httpx.AsyncClient(
+                proxy=proxy if proxy else None,
+                timeout=httpx.Timeout(60.0, connect=15.0),
+                limits=httpx.Limits(
+                    max_connections=20, max_keepalive_connections=10
+                ),
+                follow_redirects=True,
+                headers={
+                    "User-Agent": (
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/120.0.0.0 Safari/537.36"
+                    ),
+                },
+            )
+        return self._http_client
+
+    async def _download_file(self, url, suffix=".jpg", timeout=60.0):
+        """用共享连接池下载到临时文件, 受 http 信号量限流。"""
+        if not url:
+            return None
+        try:
+            import tempfile
+
+            client = self._get_http_client()
+            async with self._get_http_semaphore():
+                r = await client.get(url, timeout=timeout)
+                r.raise_for_status()
+                ext = suffix
+                for s in [".mp4", ".gif", ".jpg", ".jpeg", ".png"]:
+                    if s in url.lower():
+                        ext = s
+                        break
+                tmp = tempfile.NamedTemporaryFile(suffix=ext, delete=False)
+                tmp.write(r.content)
+                tmp.close()
+                return tmp.name
+        except Exception as e:
+            logger.warning(f"Media download failed: {url[:60]} - {e}")
+            return None
+
+    async def _llm_generate(self, provider_id, prompt, image_urls=None, timeout=None):
+        """经全局信号量限流的 LLM 调用, 可选超时。
+
+        文字分块翻译与图片翻译共享同一个信号量, 从源头限制并发 LLM 请求数,
+        并在挂起时通过 wait_for 超时切断, 避免卡死整条处理链。
+        """
+        async with self._get_llm_semaphore():
+            kwargs = {"chat_provider_id": provider_id, "prompt": prompt}
+            if image_urls:
+                kwargs["image_urls"] = image_urls
+            coro = self.context.llm_generate(**kwargs)
+            if timeout:
+                return await asyncio.wait_for(coro, timeout=timeout)
+            return await coro
 
     def _get_data_path(self):
         root = getattr(self.context, "astrbot_root", os.getcwd())
@@ -345,6 +443,12 @@ class DenpaPushPlugin(Star):
         if self.monitor_task:
             self.monitor_task.cancel()
             self.monitor_task = None
+        if self._http_client is not None and not self._http_client.is_closed:
+            try:
+                await self._http_client.aclose()
+            except Exception:
+                pass
+            self._http_client = None
 
     # ═══════════════════════════════════════════════════════════
     # Dashboard API (Signal Observatory)
@@ -1169,7 +1273,7 @@ class DenpaPushPlugin(Star):
 
             # 2. 图片提前下载到临时文件发送（避免发送时 pbs.twimg.com 直连超时）
             from astrbot.api.message_components import Node, Plain
-            import tempfile, httpx as _httpx, subprocess, os
+            import subprocess, os
 
             async def _convert_to_gif(mp4_path):
                 try:
@@ -1230,34 +1334,14 @@ class DenpaPushPlugin(Star):
                     logger.warning(f"GIF conversion failed: {e}")
                 return None
 
-            async def _dl_file(url, suffix=".jpg"):
-                try:
-                    proxy = self.config.get("proxy", None)
-                    async with _httpx.AsyncClient(
-                        proxy=proxy if proxy else None, timeout=60
-                    ) as c:
-                        r = await c.get(url)
-                        r.raise_for_status()
-                        ext = suffix
-                        # try to detect extension from url
-                        for s in [".mp4", ".gif", ".jpg", ".jpeg", ".png"]:
-                            if s in url.lower():
-                                ext = s
-                                break
-                        tmp = tempfile.NamedTemporaryFile(suffix=ext, delete=False)
-                        tmp.write(r.content)
-                        tmp.close()
-                        return tmp.name
-                except Exception as e:
-                    logger.warning(f"Media download failed: {url[:60]} - {e}")
-                    return None
-
             # 提前下载图片，同时传给卡片渲染复用
             images, gifs, videos = TwitterClient.extract_tweet_media(data)
             media_url_to_path = {}
             img_files = await asyncio.gather(
                 *[
-                    _dl_file(_twitter_media_url(img.get("media_url", ""), "orig"))
+                    self._download_file(
+                        _twitter_media_url(img.get("media_url", ""), "orig")
+                    )
                     for img in images
                     if img.get("media_url", "")
                 ]
@@ -1291,7 +1375,7 @@ class DenpaPushPlugin(Star):
             for gif in info.get("gifs", []):
                 vurl = gif.get("video_url", gif.get("media_url", ""))
                 if vurl:
-                    f = await _dl_file(vurl, suffix=".mp4")
+                    f = await self._download_file(vurl, suffix=".mp4")
                     if f:
                         gif_path = await _convert_to_gif(f)
                         if gif_path:
@@ -1305,7 +1389,7 @@ class DenpaPushPlugin(Star):
             for vid in info.get("videos", []):
                 vurl = vid.get("video_url", vid.get("media_url", ""))
                 if vurl:
-                    f = await _dl_file(vurl)
+                    f = await self._download_file(vurl)
                     if f:
                         results.append(
                             _chain([CompVideo.fromFileSystem(f)])
@@ -1418,6 +1502,21 @@ class DenpaPushPlugin(Star):
                             ]
                             if not sess_new:
                                 continue
+                            # 积压预算: 掉线期间可能积压大量推文, 每轮只补推最旧的 N 条,
+                            # 剩余留到下轮, 避免单轮长时间连接风暴拖垮网络。
+                            try:
+                                backlog_budget = max(
+                                    1, int(self.config.get("backlog_budget", 10) or 10)
+                                )
+                            except (TypeError, ValueError):
+                                backlog_budget = 10
+                            if len(sess_new) > backlog_budget:
+                                logger.warning(
+                                    f"[Monitor] {username} → {sess_umo[:20]}…: "
+                                    f"backlog {len(sess_new)} > budget {backlog_budget}, "
+                                    f"staggering into multiple rounds"
+                                )
+                                sess_new = sess_new[-backlog_budget:]
                             logger.info(
                                 f"[Monitor] {username} → {sess_umo[:20]}…: "
                                 f"{len(sess_new)} new tweets "
@@ -1514,12 +1613,10 @@ class DenpaPushPlugin(Star):
         if image_url in self._seed_cache:
             return self._seed_cache[image_url]
         try:
-            import httpx
             from PIL import Image
             import io
             from material_color_utilities import prominent_colors_from_image
 
-            proxy = self.config.get("proxy", None)
             headers = {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
                 "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
@@ -1527,27 +1624,23 @@ class DenpaPushPlugin(Star):
             }
             img_bytes = None
             used_url = image_url
-            if "_normal." in image_url:
-                sizes = ["_400x400.", "_bigger.", "_normal."]
-                base = image_url.replace("_normal.", "{}")
-                async with httpx.AsyncClient(
-                    proxy=proxy if proxy else None, timeout=15
-                ) as _c:
+            _c = self._get_http_client()
+            async with self._get_http_semaphore():
+                if "_normal." in image_url:
+                    sizes = ["_400x400.", "_bigger.", "_normal."]
+                    base = image_url.replace("_normal.", "{}")
                     for s in sizes:
                         try:
                             u = base.format(s)
-                            _r = await _c.get(u, headers=headers)
+                            _r = await _c.get(u, headers=headers, timeout=15)
                             _r.raise_for_status()
                             img_bytes = _r.content
                             used_url = u
                             break
                         except Exception:
                             continue
-            else:
-                async with httpx.AsyncClient(
-                    proxy=proxy if proxy else None, timeout=15
-                ) as _c:
-                    _r = await _c.get(image_url, headers=headers)
+                else:
+                    _r = await _c.get(image_url, headers=headers, timeout=15)
                     _r.raise_for_status()
                     img_bytes = _r.content
             if not img_bytes:
@@ -2060,35 +2153,14 @@ class DenpaPushPlugin(Star):
         if not target_sessions:
             return {}
 
-        import tempfile, httpx as _httpx
-
-        async def _dl_file(url, suffix=".jpg"):
-            try:
-                proxy = self.config.get("proxy", None)
-                async with _httpx.AsyncClient(
-                    proxy=proxy if proxy else None, timeout=60
-                ) as c:
-                    r = await c.get(url)
-                    r.raise_for_status()
-                    ext = suffix
-                    for s in [".mp4", ".gif", ".jpg", ".jpeg", ".png"]:
-                        if s in url.lower():
-                            ext = s
-                            break
-                    tmp = tempfile.NamedTemporaryFile(suffix=ext, delete=False)
-                    tmp.write(r.content)
-                    tmp.close()
-                    return tmp.name
-            except Exception as e:
-                logger.warning(f"Media download failed: {url[:60]} - {e}")
-                return None
-
         # 提前下载图片，传给卡片渲染复用
         images, gifs, videos = TwitterClient.extract_tweet_media(data)
         media_url_to_path = {}
         img_files = await asyncio.gather(
             *[
-                _dl_file(_twitter_media_url(img.get("media_url", ""), "orig"))
+                self._download_file(
+                    _twitter_media_url(img.get("media_url", ""), "orig")
+                )
                 for img in images
                 if img.get("media_url", "")
             ]
@@ -2305,9 +2377,10 @@ class DenpaPushPlugin(Star):
             prompt_tpl = self.config.get("text_translate_prompt", "") or default_prompt
             prompt = prompt_tpl.replace("{lang}", target_lang).replace("{prefix}", prefix).replace("{text}", chunk)
             try:
-                llm_resp = await self.context.llm_generate(
-                    chat_provider_id=provider_id,
+                llm_resp = await self._llm_generate(
+                    provider_id=provider_id,
                     prompt=prompt,
+                    timeout=self._llm_timeout(),
                 )
                 self._track_token_usage(llm_resp)
                 if llm_resp and llm_resp.completion_text:
@@ -2357,12 +2430,10 @@ class DenpaPushPlugin(Star):
             async def _translate_one(url):
                 try:
                     prompt = img_prompt_tpl.replace("{lang}", target_lang)
-                    resp = await asyncio.wait_for(
-                        self.context.llm_generate(
-                            chat_provider_id=provider_id,
-                            prompt=prompt,
-                            image_urls=[url],
-                        ),
+                    resp = await self._llm_generate(
+                        provider_id=provider_id,
+                        prompt=prompt,
+                        image_urls=[url],
                         timeout=60,
                     )
                     self._track_token_usage(resp)
@@ -2385,9 +2456,10 @@ class DenpaPushPlugin(Star):
             for img_url in img_urls:
                 text_in_image = await self._ocr_image(img_url)
                 if text_in_image:
-                    llm_resp = await self.context.llm_generate(
-                        chat_provider_id=provider_id,
+                    llm_resp = await self._llm_generate(
+                        provider_id=provider_id,
                         prompt=f"将以下内容翻译成{target_lang}:\n\n{text_in_image}",
+                        timeout=self._llm_timeout(),
                     )
                     self._track_token_usage(llm_resp)
                     result = llm_resp.completion_text or ""
@@ -2400,11 +2472,10 @@ class DenpaPushPlugin(Star):
     async def _ocr_image(self, img_url: str) -> str:
         try:
             from easyocr import Reader
-            import httpx
 
             reader = Reader(["ch_sim", "en"], gpu=False)
-            async with httpx.AsyncClient(timeout=30) as c:
-                r = await c.get(img_url)
+            async with self._get_http_semaphore():
+                r = await self._get_http_client().get(img_url, timeout=30)
                 if r.status_code == 200:
                     import tempfile
 

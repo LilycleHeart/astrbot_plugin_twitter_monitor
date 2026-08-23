@@ -81,5 +81,29 @@
     "type": "bool",
     "default": false,
     "hint": "开启后收到链接仅回复一次确认请求，不再输出额外对话文本，直接发送解析结果（卡片/图片/视频）"
+  },
+  "llm_concurrency": {
+    "description": "LLM 并发上限",
+    "type": "int",
+    "default": 3,
+    "hint": "同时进行的 LLM 请求数上限（文字分块翻译与图片翻译共享），防止并发打爆 API"
+  },
+  "llm_timeout": {
+    "description": "LLM 单次请求超时（秒）",
+    "type": "int",
+    "default": 120,
+    "hint": "单次 LLM 请求的超时时间，防止 API 挂起导致整条处理链卡死"
+  },
+  "http_concurrency": {
+    "description": "HTTP 下载并发上限",
+    "type": "int",
+    "default": 8,
+    "hint": "图片/媒体下载的并发连接数上限（共享连接池，避免每条推文新建裸连接）"
+  },
+  "backlog_budget": {
+    "description": "每账号每轮补推上限",
+    "type": "int",
+    "default": 10,
+    "hint": "掉线期间积压的推文每轮最多补推多少条，剩余留到下一轮，避免积压雪崩拖垮网络"
   }
 }
